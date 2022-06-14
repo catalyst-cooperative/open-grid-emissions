@@ -1,5 +1,7 @@
 from email import message
 from functools import partial
+from math import comb
+from turtle import shape
 import pandas as pd
 import numpy as np
 from pandas import DataFrame
@@ -2120,34 +2122,13 @@ def combine_subplant_data(cems, partial_cems, shaped_eia_data):
     Note: returns dask dataframe (not used before this point in pipeline) because of data size
     
     """
-    # Convert to dask because we are about to make a GIANT dataframe
-    # 2,900,000 rows/partition leads to approx 1GB chunk size
-    cems = dd.from_pandas(cems, npartitions=20)
-    partial_cems = dd.from_pandas(partial_cems, npartitions=20)
-    shaped_eia_data = dd.from_pandas(shaped_eia_data, npartitions=20)
-
-    # identify the source
-    cems["data_source"] = "CEMS reported"
-    partial_cems["data_source"] = "partial CEMS/EIA"
-    shaped_eia_data["data_source"] = "EIA imputed"
-
-    # identify net generation method
-    cems = cems.rename(columns={"gtn_method": "net_generation_method"})
-    shaped_eia_data["net_generation_method"] = shaped_eia_data["profile_method"]
-    partial_cems["net_generation_method"] = "partial_cems"
-
-    # identify hourly profile method
-    cems["hourly_profile_source"] = "CEMS"
-    partial_cems["hourly_profile_source"] = "partial CEMS"
-    shaped_eia_data = shaped_eia_data.rename(
-        columns={"profile_method": "hourly_profile_source"}
-    )
+    NPARTITIONS = 2000
 
     columns_to_use = [
         "plant_id_eia",
         "subplant_id",
         "report_date",
-        "datetime_utc",
+        # "datetime_utc",
         "data_source",
         "hourly_profile_source",
         "gross_generation_mwh",
@@ -2196,6 +2177,27 @@ def combine_subplant_data(cems, partial_cems, shaped_eia_data):
         "so2_mass_lb_adjusted",
     ]
 
+    cems.datetime_utc = pd.to_datetime(cems.datetime_utc)
+    partial_cems.datetime_utc = pd.to_datetime(partial_cems.datetime_utc)
+    shaped_eia_data.datetime_utc = pd.to_datetime(shaped_eia_data.datetime_utc)
+
+    # identify the source
+    cems["data_source"] = "CEMS reported"
+    partial_cems["data_source"] = "partial CEMS/EIA"
+    shaped_eia_data["data_source"] = "EIA imputed"
+
+    # identify net generation method
+    cems = cems.rename(columns={"gtn_method": "net_generation_method"})
+    shaped_eia_data["net_generation_method"] = shaped_eia_data["profile_method"]
+    partial_cems["net_generation_method"] = "partial_cems"
+
+    # identify hourly profile method
+    cems["hourly_profile_source"] = "CEMS"
+    partial_cems["hourly_profile_source"] = "partial CEMS"
+    shaped_eia_data = shaped_eia_data.rename(
+        columns={"profile_method": "hourly_profile_source"}
+    )
+
     # Select rows
     cems = (
         cems.groupby(
@@ -2209,27 +2211,51 @@ def combine_subplant_data(cems, partial_cems, shaped_eia_data):
                 "hourly_profile_source",
             ],
             dropna=False,
+            sort=False,
         )
         .sum()
-        .reset_index()[[col for col in cems.columns if col in columns_to_use]]
+        .reset_index()  # resetting then setting index is slow, but unavoidable https://github.com/dask/dask/issues/7807
     )
 
-    partial_cems = partial_cems[
-        [col for col in partial_cems.columns if col in columns_to_use]
-    ]
+    cems.set_index("datetime_utc", inplace=True)
+    partial_cems.set_index("datetime_utc", inplace=True)
+    shaped_eia_data.set_index("datetime_utc", inplace=True)
 
-    shaped_eia_data = shaped_eia_data[
-        [col for col in shaped_eia_data.columns if col in columns_to_use]
-    ]
+    # Convert to dask because we are about to make a GIANT dataframe
+    # 2,900,000 rows/partition leads to approx 1GB chunk size
+    cems = dd.from_pandas(
+        cems[[col for col in cems.columns if col in columns_to_use]],
+        npartitions=NPARTITIONS,
+    )
+    partial_cems = dd.from_pandas(
+        partial_cems[[col for col in partial_cems.columns if col in columns_to_use]],
+        npartitions=NPARTITIONS,
+    )
+    shaped_eia_data = dd.from_pandas(
+        shaped_eia_data[
+            [col for col in shaped_eia_data.columns if col in columns_to_use]
+        ],
+        npartitions=NPARTITIONS,
+    )
+
+    print()
+    print(cems.index)
+    print()
+    print(partial_cems.index)
+    print()
+    print(shaped_eia_data.index)
+    print()
 
     # aggregate the data by plant and concat together
     combined_subplant_data = dd.concat([cems, partial_cems, shaped_eia_data], axis=0,)
+    # index type gets dropped during concat, not sure why
+    combined_subplant_data.index = combined_subplant_data.index.astype("datetime64[ns]")
 
     combined_subplant_data["subplant_id"] = combined_subplant_data[
         "subplant_id"
     ].fillna(0)
 
-    combined_subplant_data[data_columns] = combined_subplant_data[data_columns].round(2)
+    # combined_subplant_data[data_columns] = combined_subplant_data[data_columns].round(2)
 
     combined_subplant_data = combined_subplant_data.astype(
         {
@@ -2238,11 +2264,35 @@ def combine_subplant_data(cems, partial_cems, shaped_eia_data):
             "data_source": "category",
             "hourly_profile_source": "category",
             "net_generation_method": "category",
+            "report_date": "datetime64",
+            # "datetime_utc": "datetime64",
+            "gross_generation_mwh": "float",
+            "net_generation_mwh": "float",
+            "steam_load_1000_lb": "float",
+            "fuel_consumed_mmbtu": "float",
+            "fuel_consumed_for_electricity_mmbtu": "float",
+            "co2_mass_lb": "float",
+            "ch4_mass_lb": "float",
+            "n2o_mass_lb": "float",
+            "nox_mass_lb": "float",
+            "so2_mass_lb": "float",
+            "co2_mass_lb_for_electricity": "float",
+            "ch4_mass_lb_for_electricity": "float",
+            "n2o_mass_lb_for_electricity": "float",
+            "nox_mass_lb_for_electricity": "float",
+            "so2_mass_lb_for_electricity": "float",
+            "co2_mass_lb_adjusted": "float",
+            "ch4_mass_lb_adjusted": "float",
+            "n2o_mass_lb_adjusted": "float",
+            "nox_mass_lb_adjusted": "float",
+            "so2_mass_lb_adjusted": "float",
         }
     )
 
     # re-order the columns
-    combined_subplant_data = combined_subplant_data[columns_to_use]
+    # combined_subplant_data = combined_subplant_data[columns_to_use]
+
+    print(combined_subplant_data.dtypes)
 
     return combined_subplant_data
 
@@ -2280,16 +2330,32 @@ def aggregate_plant_data_to_ba_fuel(combined_plant_data, plant_frame):
     print("Plant data to dask")
     # Dask freaks out when trying to merge on custom pandas Int type, so convert to np int
     plant_frame = plant_frame.astype({"plant_id_eia": np.int64})
-    plant_frame = dd.from_pandas(plant_frame, chunksize=100000)
+    plant_frame = plant_frame.set_index("plant_id_eia")
+    # plant_frame = dd.from_pandas(plant_frame, chunksize=100000)
 
-    print("Merging plant data")
-    ba_fuel_data = combined_plant_data.merge(
-        plant_frame, how="left", left_on=["plant_id_eia"], right_index=True
+    # print("Merging plant data")
+    # ba_fuel_data = combined_plant_data.merge(
+    #     plant_frame, how="left", left_on=["plant_id_eia"], right_index=True
+    # )
+
+    # Gailin 6/13: merging (above) may trigger dask re-sort. try mapping instead:
+    dtypes = combined_plant_data.dtypes.to_dict()
+    dtypes["ba_code"] = str
+    combined_plant_data = combined_plant_data.map_partitions(
+        lambda df: df.assign(ba_code=plant_frame.loc[df.plant_id_eia, "ba_code"]),
+        meta=dtypes,
+    )
+    dtypes["fuel_category"] = str
+    combined_plant_data = combined_plant_data.map_partitions(
+        lambda df: df.assign(
+            fuel_category=plant_frame.loc[df.plant_id_eia, "fuel_category"]
+        ),
+        meta=dtypes,
     )
 
     print("Grouping plant data")
     ba_fuel_data = (
-        ba_fuel_data.groupby(
+        combined_plant_data.groupby(
             ["datetime_utc", "ba_code", "fuel_category"], dropna=False
         )[data_columns]
         .sum()
