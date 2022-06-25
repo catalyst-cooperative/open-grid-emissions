@@ -2092,6 +2092,11 @@ def aggregate_plant_data_to_ba_fuel(combined_plant_data, plant_frame):
     ba_fuel_data = combined_plant_data.merge(
         plant_frame, how="left", on=["plant_id_eia"]
     )
+
+    # As a bandaid for nan-BA and nan-fuel plants, drop nan-BA and set nan-fuel to 'natural_gas'
+    ba_fuel_data = ba_fuel_data.dropna(subset="ba_code")
+    ba_fuel_data.loc[ba_fuel_data.fuel_category.isna(), "fuel_category"] = "natural_gas"
+
     ba_fuel_data = (
         ba_fuel_data.groupby(
             ["ba_code", "fuel_category", "datetime_utc"], dropna=False

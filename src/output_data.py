@@ -220,6 +220,9 @@ def write_power_sector_results(ba_fuel_data, path_prefix):
     ]
 
     for ba in list(ba_fuel_data.ba_code.unique()):
+        if ba == "NA":
+            print("Got unexpected BA `NA`. What's up with that? Skipping.")
+            continue
         if type(ba) is not str:
             print(
                 f"Warning: not aggregating {sum(ba_fuel_data.ba_code.isna())} plants with numeric BA {ba}"
